@@ -9,6 +9,9 @@
     <!-- Wake lock to keep CPU awake while playing with screen off -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Ignore battery optimization for uninterrupted background playback -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Foreground service permissions (Required for Android 9+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     

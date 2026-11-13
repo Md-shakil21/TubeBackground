@@ -9,6 +9,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -21,11 +24,13 @@ class BackgroundAudioService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var mediaSession: MediaSessionCompat? = null
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
     private var currentTitle: String = "YouTube Video"
     private var isCurrentlyPlaying: Boolean = true
 
     companion object {
-        const val CHANNEL_ID = "yt_background_channel"
+        const val CHANNEL_ID = "yt_background_channel_v2"
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_START = "com.shakil.ytbackground.ACTION_START"
@@ -45,8 +50,10 @@ class BackgroundAudioService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         createNotificationChannel()
         setupMediaSession()
+        requestAudioFocus()
         acquireWakeLock()
         isServiceRunning = true
     }
@@ -58,6 +65,7 @@ class BackgroundAudioService : Service() {
                 val isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, true)
                 currentTitle = title
                 isCurrentlyPlaying = isPlaying
+                updatePlaybackState()
                 startForegroundWithNotification()
             }
             ACTION_UPDATE -> {
@@ -66,21 +74,21 @@ class BackgroundAudioService : Service() {
                     currentTitle = title
                 }
                 isCurrentlyPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, isCurrentlyPlaying)
+                updatePlaybackState()
                 updateNotification()
             }
             ACTION_TOGGLE_PLAY -> {
-                // Send broadcast to MainActivity to play/pause video
                 sendBroadcast(Intent(BROADCAST_PLAY_PAUSE).setPackage(packageName))
                 isCurrentlyPlaying = !isCurrentlyPlaying
+                updatePlaybackState()
                 updateNotification()
             }
             ACTION_STOP -> {
-                // Send broadcast to MainActivity
                 sendBroadcast(Intent(BROADCAST_STOP).setPackage(packageName))
                 stopSelf()
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun setupMediaSession() {
@@ -90,12 +98,14 @@ class BackgroundAudioService : Service() {
                 override fun onPlay() {
                     sendBroadcast(Intent(BROADCAST_PLAY_PAUSE).setPackage(packageName))
                     isCurrentlyPlaying = true
+                    updatePlaybackState()
                     updateNotification()
                 }
 
                 override fun onPause() {
                     sendBroadcast(Intent(BROADCAST_PLAY_PAUSE).setPackage(packageName))
                     isCurrentlyPlaying = false
+                    updatePlaybackState()
                     updateNotification()
                 }
 
@@ -104,6 +114,29 @@ class BackgroundAudioService : Service() {
                     stopSelf()
                 }
             })
+        }
+        updatePlaybackState()
+    }
+
+    private fun requestAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val playbackAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(playbackAttributes)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { /* Keep playing */ }
+                .build()
+            audioFocusRequest?.let { audioManager?.requestAudioFocus(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager?.requestAudioFocus(
+                null,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
         }
     }
 
@@ -123,7 +156,6 @@ class BackgroundAudioService : Service() {
     private fun updateNotification() {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(NOTIFICATION_ID, buildNotification())
-        updatePlaybackState()
     }
 
     private fun updatePlaybackState() {
@@ -146,7 +178,7 @@ class BackgroundAudioService : Service() {
 
     private fun buildNotification(): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val openPendingIntent = PendingIntent.getActivity(
             this,
@@ -184,6 +216,7 @@ class BackgroundAudioService : Service() {
             .setContentText(if (isCurrentlyPlaying) getString(R.string.playback_active) else getString(R.string.playback_paused))
             .setContentIntent(openPendingIntent)
             .setOngoing(isCurrentlyPlaying)
+            .setSilent(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(playPauseIcon, playPauseTitle, togglePlayPendingIntent)
             .addAction(R.drawable.ic_stop, getString(R.string.action_stop), stopPendingIntent)
@@ -205,6 +238,8 @@ class BackgroundAudioService : Service() {
             ).apply {
                 description = getString(R.string.channel_description)
                 setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
             }
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)

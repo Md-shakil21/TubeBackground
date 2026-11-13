@@ -35,11 +35,11 @@ jobs:
       - name: Rename APK for clarity
         run: |
           mkdir -p build-output
-          cp app/build/outputs/apk/debug/*.apk build-output/TubeBackground-v1.0.0.apk
+          cp app/build/outputs/apk/debug/*.apk build-output/TubeBackground-v1.0.1.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TubeBackground-APK
-          path: build-output/TubeBackground-v1.0.0.apk
+          name: TubeBackground-v1.0.1-APK
+          path: build-output/TubeBackground-v1.0.1.apk
           retention-days: 30

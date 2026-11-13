@@ -83,8 +83,8 @@
         android:progressTint="@color/youtube_red"
         android:visibility="gone" />
 
-    <!-- Main YouTube WebView -->
-    <WebView
+    <!-- Custom BackgroundPlayWebView that keeps playing when screen is locked -->
+    <com.shakil.ytbackground.BackgroundPlayWebView
         android:id="@+id/webView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"

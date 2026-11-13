@@ -8,8 +8,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.View
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -28,6 +31,7 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
     private lateinit var binding: ActivityMainBinding
     private var isVideoPlaying: Boolean = false
     private var currentVideoTitle: String = "YouTube Video"
+    private var activityWakeLock: PowerManager.WakeLock? = null
 
     private val userAgentString =
         "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -47,6 +51,8 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
         setContentView(binding.root)
 
         requestRequiredPermissions()
+        acquireActivityWakeLock()
+        checkBatteryOptimization()
         setupNavigationControls()
         setupWebView()
         setupBackNavigation()
@@ -69,6 +75,34 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
                     101
                 )
             }
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun checkBatteryOptimization() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // Ignore if device doesn't support intent
+                }
+            }
+        }
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun acquireActivityWakeLock() {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        activityWakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "TubeBackground::ActivityWakeLock"
+        ).apply {
+            acquire()
         }
     }
 
@@ -116,6 +150,7 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
                 } else {
                     binding.progressBar.visibility = View.GONE
                 }
+                injectBackgroundScript()
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
@@ -149,37 +184,88 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
                 super.onPageFinished(view, url)
                 injectBackgroundScript()
             }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                injectBackgroundScript()
+            }
         }
     }
 
     private fun injectBackgroundScript() {
         val js = """
             (function() {
-                if (window.__yt_bg_injected) return;
-                window.__yt_bg_injected = true;
+                if (window.__yt_bg_fix_installed) return;
+                window.__yt_bg_fix_installed = true;
 
-                // Keep visibility always active
-                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
-                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
-                Object.defineProperty(document, 'webkitVisibilityState', { get: function() { return 'visible'; }, configurable: true });
-                Object.defineProperty(document, 'webkitHidden', { get: function() { return false; }, configurable: true });
+                // 1. Force Page Visibility API to always evaluate to visible
+                try {
+                    Object.defineProperties(document, {
+                        'hidden': { get: function() { return false; }, configurable: true },
+                        'visibilityState': { get: function() { return 'visible'; }, configurable: true },
+                        'webkitHidden': { get: function() { return false; }, configurable: true },
+                        'webkitVisibilityState': { get: function() { return 'visible'; }, configurable: true }
+                    });
+                } catch(e) {}
 
-                var suppressEvent = function(e) {
+                // 2. Prevent YouTube from attaching visibilitychange listeners
+                try {
+                    var origAddEventListener = EventTarget.prototype.addEventListener;
+                    EventTarget.prototype.addEventListener = function(type, listener, options) {
+                        if (type === 'visibilitychange' || type === 'webkitvisibilitychange') {
+                            return; // Silently drop visibility listeners!
+                        }
+                        return origAddEventListener.call(this, type, listener, options);
+                    };
+                } catch(e) {}
+
+                // 3. Block visibility events from bubbling
+                var blockEvent = function(e) {
                     e.stopImmediatePropagation();
                 };
                 ['visibilitychange', 'webkitvisibilitychange', 'blur', 'pagehide'].forEach(function(ev) {
-                    window.addEventListener(ev, suppressEvent, true);
-                    document.addEventListener(ev, suppressEvent, true);
+                    window.addEventListener(ev, blockEvent, true);
+                    document.addEventListener(ev, blockEvent, true);
                 });
 
-                // Detect video playback status
+                // 4. Auto-resume when video is paused by system/screen lock (not user)
+                window.__userPaused = false;
+
+                document.addEventListener('pause', function(e) {
+                    if (e.target && e.target.tagName === 'VIDEO') {
+                        var video = e.target;
+                        if (!window.__userPaused && !video.ended) {
+                            setTimeout(function() {
+                                if (!window.__userPaused && video.paused) {
+                                    video.play();
+                                }
+                            }, 100);
+                        }
+                    }
+                }, true);
+
+                // 5. Periodic monitor: keep video playing and dismiss "Still watching?" dialog
                 setInterval(function() {
                     try {
                         var video = document.querySelector('video');
-                        if (video && window.AndroidInterface) {
+                        if (video) {
                             var isPlaying = !video.paused && !video.ended && video.readyState > 2;
                             var title = document.title ? document.title.replace(' - YouTube', '').trim() : 'YouTube';
-                            window.AndroidInterface.onPlaybackStateChanged(isPlaying, title);
+                            if (window.AndroidInterface) {
+                                window.AndroidInterface.onPlaybackStateChanged(isPlaying, title);
+                            }
+
+                            // If paused without user consent while still supposed to play:
+                            if (!window.__userPaused && video.paused && !video.ended && video.currentTime > 0) {
+                                video.play();
+                            }
+                        }
+
+                        // Auto-dismiss "Video paused. Continue watching?" prompt
+                        var confirmBtn = document.querySelector('yt-confirm-dialog-renderer #confirm-button button') ||
+                                         document.querySelector('.yt-spec-button-shape-next--filled');
+                        if (confirmBtn && confirmBtn.offsetParent !== null) {
+                            confirmBtn.click();
                         }
                     } catch(e) {}
                 }, 1000);
@@ -197,7 +283,6 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
                 binding.tvStatus.text = title
             }
 
-            // Sync with background foreground service
             if (isPlaying) {
                 startOrUpdateService(true)
             } else if (BackgroundAudioService.isServiceRunning) {
@@ -230,8 +315,10 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
                     var video = document.querySelector('video');
                     if (video) {
                         if (video.paused) {
+                            window.__userPaused = false;
                             video.play();
                         } else {
+                            window.__userPaused = true;
                             video.pause();
                         }
                     }
@@ -245,6 +332,7 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
         runOnUiThread {
             val js = """
                 (function() {
+                    window.__userPaused = true;
                     var video = document.querySelector('video');
                     if (video) {
                         video.pause();
@@ -262,7 +350,6 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
                 if (binding.webView.canGoBack()) {
                     binding.webView.goBack()
                 } else {
-                    // Minimize app instead of killing so music keeps playing
                     moveTaskToBack(true)
                 }
             }
@@ -284,13 +371,13 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
 
     override fun onPause() {
         super.onPause()
-        // DO NOT call binding.webView.onPause() here!
-        // Leaving WebView active ensures audio continues playing when screen turns off.
+        // DO NOT pause WebView!
+        injectBackgroundScript()
     }
 
     override fun onStop() {
         super.onStop()
-        // Ensure background service is running if video was playing
+        injectBackgroundScript()
         if (isVideoPlaying) {
             startOrUpdateService(true)
         }
@@ -299,8 +386,9 @@ class MainActivity : AppCompatActivity(), WebAppInterface.PlaybackListener {
     override fun onDestroy() {
         try {
             unregisterReceiver(serviceBroadcastReceiver)
-        } catch (e: Exception) {
-            // Receiver not registered
+        } catch (e: Exception) {}
+        if (activityWakeLock?.isHeld == true) {
+            activityWakeLock?.release()
         }
         if (!isVideoPlaying) {
             stopService(Intent(this, BackgroundAudioService::class.java))
