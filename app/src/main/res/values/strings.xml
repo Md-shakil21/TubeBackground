@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">TubeBackground</string>
+    <string name="channel_name">YouTube Background Playback</string>
+    <string name="channel_description">Shows playback controls and status when YouTube is playing in the background</string>
+    <string name="action_play">Play</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_stop">Stop</string>
+    <string name="playback_active">Playing in background</string>
+    <string name="playback_paused">Playback paused</string>
+</resources>
